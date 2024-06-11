@@ -13,6 +13,10 @@
 #define TRIG A0
 #define ECHO A1
 
+// defined states of app
+#define AUTONOMIC_MODE 0
+#define CONTROL_MODE 1
+
 // defined states of car
 #define STOP_STATE 100
 #define FORWARD_STATE 101
@@ -22,16 +26,25 @@
 
 // predefined constants
 volatile unsigned int CRASH_DISTANCE = 10; // Critical distance of a car, can't go further
-volatile unsigned int SERWO_DELAY = 600 // Delay in ms after one read of distance data
+volatile unsigned int SERWO_DELAY = 600; // Delay in ms after one read of distance data
+volatile unsigned int LEFT_ANGLE = 0;
+volatile unsigned int STRAIGHT_ANGLE = 90;
+volatile unsigned int RIGHT_ANGLE = 180;
 
 // global variables
-unsigned int appState = BACK_STATE; // holds current state of vehicle
+unsigned int appState = AUTONOMIC_MODE; // holds current state of app
+unsigned int carState = BACK_STATE; // holds current state of vehicle
 unsigned int lastDistance = 0; // holds last distance to the obstacle
 unsigned int speed = 100; // speed to be displayed
 unsigned int leftCount = 0; // counter for left wheel
 unsigned int rightCount = 0; // counter for right wheel
-volatile int speedLeft = 100; // current speed for left wheel
-volatile int speedRight = 100; // current speed for right wheel
+volatile int speedLeft = 150; // current speed for left wheel
+volatile int speedRight = 150; // current speed for right wheel
+
+// ticker init
+Ticker lcd_ticker(500, displayLCD);
+Ticker sonar_ticker(500, changeCarState);
+Ticker speed_ticker(1000, manageSpeed);
 
 // hardware init
 byte LCDAddress = 0x27;
@@ -50,11 +63,11 @@ void increment() {
 void displayLCD(){
   lcd.clear();
   lcd.setCursor(0,0);
-  if(appState == STOP_STATE){
+  if(carState == STOP_STATE){
     lcd.print("Stop");
-  } else if(appState == BACK_STATE){
+  } else if(carState == BACK_STATE){
     lcd.print("Back");
-  } else if(appState == FORWARD_STATE){
+  } else if(carState == FORWARD_STATE){
     lcd.print("Forward");
   }
   lcd.setCursor(0,1);
@@ -67,27 +80,24 @@ void displayLCD(){
   lcd.print(lastDistance);
 }
 
-Ticker test_ticker(500, displayLCD);
-Ticker test_ticker2(500, makeDecisionWhereToGo);
-Ticker test_ticker3(1000, manageSpeed);
-
-void appStateChange(int newAppState){
-  if(newAppState == STOP_STATE){
+// TODO: carState = newCarState przed zmianą stanu kół
+void appStateChange(int newCarState){
+  if(newCarState == STOP_STATE){
     w.stop();
-  } else if(newAppState == FORWARD_STATE){
+  } else if(newCarState == FORWARD_STATE){
     w.forward();
-  } else if(newAppState == LEFT_STATE){
+  } else if(newCarState == LEFT_STATE){
     w.left();
-  } else if(newAppState == RIGHT_STATE){
+  } else if(newCarState == RIGHT_STATE){
     w.right();
-  } else if(newAppState == BACK_STATE){
-    w.back();
+  } else if(newCarState == BACK_STATE){
+    w.left();
+    w.left();
   }
-  appState = newAppState;
+  carState = newCarState;
 }
 
 void manageSpeed(){
-
 
   Serial.println("COUNT");
   Serial.print(leftCount);
@@ -109,83 +119,70 @@ void manageSpeed(){
 }
 
 void setup() {
+  Serial.println("SETUP ...");
 
+  // Sonar setup
   pinMode(TRIG, OUTPUT);    // TRIG startuje sonar
   pinMode(ECHO, INPUT);     // ECHO odbiera powracający impuls
+  Serial.println("Sonar setup correctly.");
 
-  speed = 0;
-  speedLeft = 150;
-  speedRight = 150;
-
+  // Wheels sensors setup
   attachPCINT(digitalPinToPCINT(INTINPUT0), increment, CHANGE);
   attachPCINT(digitalPinToPCINT(INTINPUT1), increment, CHANGE);
+  Serial.println("Wheels sensors correctly.");
 
-  //w.attach(9,2,3,4,10,5);
-  // 2 4 OK
-  //w.attach(2,4,3,6,7,5);
-  // OK na odwrot w.attach(2,6,3,4,7,5);
-  // OK na odwrot kola w.attach(2,7,3,6,4,5);
-  //w.attach(6,2,3,7,4,5);
   w.attach(5,4,3,2,7,6);
-    //w.attach(4,,3,5,7,6);
-
-
   w.setSpeedLeft(speedLeft);
   w.setSpeedRight(speedRight);
-  // 4 OK
+  Serial.println("Wheels attached correctly.");
 
   Serial.begin(9600);
+  Serial.println("Serial begin on port 9600 setup correctly.");
 
   serwo.attach(SERVO);
-
-  Serial.println("Start");
-
-  //w.stop(lcd);
+  Serial.println("Serwo attached correctly.");
   
   //IrReceiver.begin(IR_RECEIVE_PIN, ENABLE_LED_FEEDBACK, 0); // Start the receiver
-    
-  angle = 0;
-  w.forward();
+  //Serial.println("IrReceiver setup correctly.");
 
-  Serial.println("Initialize LCD");
   lcd.init();
   lcd.backlight();
-  Serial.println("LCD initialized correctly");
+  Serial.println("LCD setup correctly");
 
+  if(appState == AUTONOMIC_MODE){
+    w.forward();
+  }
 }
 
-void makeDecisionWhereToGo(){
-    // Look forward:
-
-    byte frontAngle = 90;
-    serwo.write(frontAngle);
+void changeCarState(){
+    // Car is going forward. Look forward:
     unsigned int distance = lookAndTellDistance(frontAngle);
     lastDistance = distance;
-
-    // If distance < 20, search through different angles and make a choice:
-
-    if(distance < 20){
-      appStateChange(STOP_STATE);
-      serwo.write(0);
-      delay(SERWO_DELAY);
-      distance = lookAndTellDistance(0);
-      if(distance >= 20){
-        appStateChange(RIGHT_STATE);
-        appStateChange(FORWARD_STATE);
-      } else{
-        serwo.write(180);
-        delay(SERWO_DELAY);
-        distance = lookAndTellDistance(180);
-        if(distance >= 20){
-          appStateChange(LEFT_STATE);
-          appStateChange(FORWARD_STATE);
-        } else{
-          serwo.write(90);
-          appStateChange(BACK_STATE);
-        }
-      }
+    if(distance >= 20){
+      return;
     }
 
+    // There is an obstacle in front of the car. Check if the car can go left:
+    appStateChange(STOP_STATE);
+    distance = lookAndTellDistance(LEFT_ANGLE);
+    if(distance >= 20){
+      appStateChange(LEFT_STATE);
+      appStateChange(FORWARD_STATE);
+      return;
+    }
+
+    // There is an obstacle in front of the car and on the left. Check if the car can go right:
+    distance = lookAndTellDistance(RIGHT_ANGLE);
+    if(distance >= 20){
+      appStateChange(RIGHT_STATE);
+      appStateChange(FORWARD_STATE);
+      return;
+    }
+
+    // Car can't go further in front/left/right direction. The car has to go back
+
+    appStateChange(BACK_STATE);
+    appStateChange(FORWARD_STATE);
 }
 
 void loop10(){
@@ -220,6 +217,7 @@ unsigned int lookAndTellDistance(byte angle) {
   Serial.print("Patrzę w kącie ");
   Serial.print(angle);
   serwo.write(angle);
+  delay(SERWO_DELAY);
   
   digitalWrite(TRIG, HIGH);
   delay(10);
@@ -235,9 +233,7 @@ unsigned int lookAndTellDistance(byte angle) {
 }
 
 void loop(){
-  //w.forward();
-  //delay(5000);
   test_ticker.check();
-  test_ticker2.check();
-  test_ticker3.check();
+  sonar_ticker.check();
+  speed_ticker.check();
 }
